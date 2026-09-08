@@ -233,6 +233,20 @@ func (vm *syncViewModel) initGitFetch() tea.Cmd {
 		vm.client,
 		currentBranchRef,
 		targetBranches,
+		vm.initRebaseToTrunkFastForward,
+	))
+}
+
+func (vm *syncViewModel) initRebaseToTrunkFastForward() tea.Cmd {
+	// When --rebase-to-trunk is set, every stack root is rebased onto the
+	// local trunk branch. Fast-forward the local trunk to its remote tracking
+	// branch first so the rebase targets the freshly-fetched trunk instead of
+	// a stale local copy that would replay commits already on the remote.
+	if !syncFlags.RebaseToTrunk {
+		return vm.initSequencerState()
+	}
+	return vm.AddView(gitui.NewFastForwardTrunkModel(
+		vm.repo,
 		vm.initSequencerState,
 	))
 }
@@ -301,7 +315,9 @@ func (vm *syncViewModel) initPruneBranches() tea.Cmd {
 }
 
 func (vm *syncViewModel) initFastForwardTrunk() tea.Cmd {
-	if !vm.state.FastForwardTrunk {
+	// When --rebase-to-trunk is set, the trunk was already fast-forwarded
+	// before the restack was planned; running it again here would be redundant.
+	if !vm.state.FastForwardTrunk || syncFlags.RebaseToTrunk {
 		return tea.Quit
 	}
 	return vm.AddView(gitui.NewFastForwardTrunkModel(

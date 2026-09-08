@@ -1,0 +1,33 @@
+# Regression: a diverged local trunk must be left untouched when
+# av sync --rebase-to-trunk runs (existing non-fast-forward safety behavior).
+#
+# Setup:
+#   main = X, stack-1 = X -> 1a
+#   main advances to X2 and is pushed, so origin/main = X2
+#   local main is reset before X2 and given a local-only commit L,
+#   so local main and origin/main diverge.
+
+exec git switch main
+
+# Create the stack root off the original main.
+exec av branch stack-1
+commit-file stack-file '1a\n' 'Commit 1a'
+
+# Advance main and push.
+exec git switch main
+commit-file upstream-file 'X2\n' 'Already-upstream commit'
+exec git push origin main
+
+# Diverge local main: reset it behind origin/main, then add a local commit.
+exec git reset --hard origin/main~1
+commit-file local-file 'L\n' 'Local-only commit'
+
+exec git switch stack-1
+exec av sync --rebase-to-trunk --push=no --prune=no
+
+# The diverged local trunk must be preserved: its local-only commit remains,
+# and the sync does not overwrite it with origin/main.
+exec git rev-list --count main ^origin/main
+stdout '^1$'
+exec git rev-list --count origin/main ^main
+stdout '^1$'

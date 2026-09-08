@@ -1,0 +1,27 @@
+# Regression: ordinary av sync (without --rebase-to-trunk or --ff-trunk)
+# must not fast-forward the local trunk.
+#
+# Setup:
+#   main = X, stack-1 = X -> 1a, stack-2 = stack-1 -> 2a
+#   main advances to X2 and is pushed, then local main is reset stale.
+
+exec git switch main
+
+exec av branch stack-1
+commit-file stack-file '1a\n' 'Commit 1a'
+exec av branch stack-2
+commit-file stack-file '1a\n2a\n' 'Commit 2a'
+
+# Advance main and push, then make local main stale.
+exec git switch main
+commit-file upstream-file 'X2\n' 'Already-upstream commit'
+exec git push origin main
+exec git update-ref refs/heads/main origin/main~1
+
+# Must be on a stack branch, not trunk, to avoid the "sync all stacks?" prompt.
+exec git switch stack-2
+exec av sync --push=no --prune=no
+
+# Ordinary sync must not touch the local trunk: main is still stale.
+exec git rev-list --count origin/main ^main
+stdout '^1$'
