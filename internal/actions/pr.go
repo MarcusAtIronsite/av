@@ -796,13 +796,20 @@ func walkStack(tx meta.ReadTx, stack *stackutils.StackTreeNode, branchName strin
 		ssb.WriteString("\n")
 	}
 
-	// For more complex stacks, print them sideways using a bulleted list. For example:
-	// - main
-	//   - #1
+	// For more complex stacks, print them sideways using a bulleted list. As
+	// with simple stacks, print children before their parent so the output is
+	// consistently top-down. For example, a main with #1 (child #2) and #3
+	// renders as:
 	//     - #2
+	//   - #1
 	//   - #3
+	// - main
 	var visitComplex func(node *stackutils.StackTreeNode, depth int)
 	visitComplex = func(node *stackutils.StackTreeNode, depth int) {
+		for _, child := range node.Children {
+			visitComplex(child, depth+1)
+		}
+
 		if depth == 0 {
 			ssb.WriteString("* ")
 			ssb.WriteString("`")
@@ -826,10 +833,6 @@ func walkStack(tx meta.ReadTx, stack *stackutils.StackTreeNode, branchName strin
 			}
 		}
 		ssb.WriteString("\n")
-
-		for _, child := range node.Children {
-			visitComplex(child, depth+1)
-		}
 	}
 
 	var hasMultipleChildren func(node *stackutils.StackTreeNode) bool

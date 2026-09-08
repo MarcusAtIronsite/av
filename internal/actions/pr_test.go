@@ -228,10 +228,10 @@ func TestPRWithForkedStack(t *testing.T) {
 	assert.Equal(t, `<!-- av pr stack begin -->
 <table><tr><td><details><summary><b>Depends on #1001.</b> This PR is part of a stack created with <a href="https://github.com/aviator-co/av">Aviator</a>.</summary>
 
-* `+"`"+`main`+"`"+`
-  * **#1001**
     * ➡️ **#1002**
+  * **#1001**
   * **#1003**
+* `+"`"+`main`+"`"+`
 </details></td></tr></table>
 <!-- av pr stack end -->
 
