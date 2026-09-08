@@ -870,11 +870,9 @@ func AddPRMetadataAndStack(
 
 	sb := strings.Builder{}
 
-	// Don't write out a stack unless there is more than one PR in it.
-	hasMultilevelStack := stack != nil && len(stack.Children) > 0 &&
-		len(stack.Children[0].Children) > 0
-	if hasMultilevelStack {
-		bi, _ := tx.Branch(branchName)
+	// Write out the stack tree whenever the branch is part of a stack, even a
+	// single PR based directly on the trunk.
+	if stack != nil && len(stack.Children) > 0 {
 		stackString := walkStack(tx, stack, branchName)
 		sb.WriteString(PRStackCommentStart)
 
@@ -882,17 +880,9 @@ func AddPRMetadataAndStack(
 		// 1. It actually looks nicer on GitHub
 		// 2. For the Slack GitHub integration, Slack doesn't support and strips out <table> elements in unfurls - we can avoid showing the stack in the unfurl.
 		sb.WriteString("\n<table><tr><td>")
-		sb.WriteString("<details><summary>")
-		if !bi.Parent.Trunk {
-			parentBi, _ := tx.Branch(bi.Parent.Name)
-			sb.WriteString("<b>Depends on #")
-			sb.WriteString(strconv.FormatInt(parentBi.PullRequest.Number, 10))
-			sb.WriteString(".</b> ")
-		}
-		sb.WriteString(
-			"This PR is part of a stack created with <a href=\"https://github.com/aviator-co/av\">Aviator</a>.",
-		)
-		sb.WriteString("</summary>")
+		sb.WriteString("<details><summary>PR Tree onto <code>")
+		sb.WriteString(stack.Branch.BranchName)
+		sb.WriteString("</code> (stacked with <a href=\"https://github.com/MarcusAtIronsite/av\">MarcusAtIronsite/av</a>)</summary>")
 		sb.WriteString("\n\n")
 		sb.WriteString(stackString)
 		sb.WriteString("</details>")
