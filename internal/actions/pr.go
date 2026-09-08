@@ -1065,6 +1065,10 @@ const diffStatBarWidth = 10
 // directories and trailing filename/extension both stay visible.
 const maxFilenameLength = 36
 
+// minFrontRunes is the minimum number of leading runes of a truncated file
+// path that stay visible before the middle ellipsis.
+const minFrontRunes = 6
+
 // childIndent leads each file row under its category.
 const childIndent = "\u00a0\u00a0\u00a0\u00a0"
 
@@ -1091,7 +1095,10 @@ func barAndPercent(total, max, sum int) (string, int) {
 }
 
 // truncateMiddle shortens s to at most max runes, replacing the cut with a
-// middle ellipsis so the tail (filename and extension) stays visible.
+// middle ellipsis. For slash-delimited paths it keeps the filename (the final
+// path segment) intact and ellipsizes the leading directory prefix, which
+// always retains at least minFrontRunes runes. The filename is trimmed only
+// when it is too long to fit alongside that prefix.
 func truncateMiddle(s string, max int) string {
 	runes := []rune(s)
 	if len(runes) <= max {
@@ -1100,9 +1107,32 @@ func truncateMiddle(s string, max int) string {
 	if max < 2 {
 		return string(runes[:max])
 	}
-	head := (max - 1) / 2
-	tail := max - 1 - head
-	return string(runes[:head]) + "…" + string(runes[len(runes)-tail:])
+
+	// Locate the final path separator so the filename can be preserved.
+	sep := -1
+	for i, r := range runes {
+		if r == '/' {
+			sep = i
+		}
+	}
+
+	// Keep the whole filename (including its leading slash) and give the
+	// directory prefix whatever budget remains, but never less than
+	// minFrontRunes.
+	if sep >= 0 {
+		filename := runes[sep:]
+		if head := max - 1 - len(filename); head >= minFrontRunes {
+			return string(runes[:head]) + "…" + string(filename)
+		}
+	}
+
+	// The filename is too long to keep whole: retain a minFrontRunes prefix
+	// and show as much of the tail (the extension) as fits.
+	tail := max - 1 - minFrontRunes
+	if tail < 1 {
+		tail = 1
+	}
+	return string(runes[:minFrontRunes]) + "…" + string(runes[len(runes)-tail:])
 }
 
 // markdownFileLink returns a Markdown link to the file's diff in the PR's
