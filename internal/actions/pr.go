@@ -2,10 +2,14 @@ package actions
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"text/template"
@@ -24,7 +28,9 @@ import (
 	"github.com/aviator-co/av/internal/utils/stackutils"
 	"github.com/aviator-co/av/internal/utils/stringutils"
 	"github.com/aviator-co/av/internal/utils/templateutils"
+	"github.com/dustin/go-humanize"
 	"github.com/fatih/color"
+	"github.com/gobwas/glob"
 	"github.com/shurcooL/githubv4"
 	"github.com/sirupsen/logrus"
 )
@@ -543,7 +549,7 @@ func ensurePR(
 	var initialStack *stackutils.StackTreeNode = nil
 
 	if opts.existingPR != nil {
-		newBody := AddPRMetadataAndStack(opts.body, opts.meta, opts.headRefName, initialStack, tx)
+		newBody := AddPRMetadataAndStack(opts.body, opts.meta, opts.headRefName, initialStack, tx, nil, nil)
 		updatedPR, err := client.UpdatePullRequestIfChanged(ctx, opts.existingPR, gh.UpdatePullRequestFields{
 			Title:       gh.Ptr(opts.title),
 			Body:        gh.Ptr(newBody),
@@ -561,7 +567,7 @@ func ensurePR(
 		Title:        githubv4.String(opts.title),
 		Body: gh.Ptr(
 			githubv4.String(
-				AddPRMetadataAndStack(opts.body, opts.meta, opts.headRefName, initialStack, tx),
+				AddPRMetadataAndStack(opts.body, opts.meta, opts.headRefName, initialStack, tx, nil, nil),
 			),
 		),
 		Draft: gh.Ptr(githubv4.Boolean(opts.draft)),
@@ -763,7 +769,188 @@ func ReadPRMetadata(body string) (PRMetadata, error) {
 	return prMeta, err
 }
 
-func walkStack(tx meta.ReadTx, stack *stackutils.StackTreeNode, branchName string) string {
+// LineStat is a count of added/deleted lines.
+type LineStat struct {
+	Additions int
+	Deletions int
+}
+
+// FileLineStat is a LineStat for a single file, identified by its repository-
+// relative path (post-rename, matching the GitHub Files-changed anchor).
+type FileLineStat struct {
+	Path string
+	LineStat
+}
+
+// CategoryLineStat is a LineStat for a single configured config.DiffStatCategory,
+// along with the per-file breakdown that contributed to it (sorted by total
+// changed lines, descending).
+type CategoryLineStat struct {
+	Name string
+	LineStat
+	Files []FileLineStat
+}
+
+// resolveDiffBase returns the ref to diff against for a parent branch. It
+// prefers the remote tracking branch (e.g. origin/main) so that a stale local
+// trunk doesn't skew line counts; it falls back to the local branch when no
+// remote tracking branch exists (e.g. an un-pushed parent).
+func resolveDiffBase(ctx context.Context, repo *git.Repo, branch string) string {
+	if ok, err := repo.DoesRemoteBranchExist(ctx, branch); err == nil && ok {
+		return repo.GetRemoteName() + "/" + branch
+	}
+	return branch
+}
+
+// diffBase returns the commit to diff head against, matching GitHub's PR
+// "Files changed" semantics: the merge-base of the parent branch and head.
+// Diffing head against its parent's tip (a plain two-dot diff) would also
+// surface parent-side changes that landed after the branch point — e.g. a
+// trunk that advanced past the merge-base — inflating the counts.
+func diffBase(ctx context.Context, repo *git.Repo, parentBranch, head string) (string, error) {
+	return repo.MergeBase(ctx, resolveDiffBase(ctx, repo, parentBranch), head)
+}
+
+// ComputeStackDiffStats computes each branch's own LineStat (relative to its
+// immediate parent in the stack) for every branch in stack.
+func ComputeStackDiffStats(
+	ctx context.Context,
+	repo *git.Repo,
+	stack *stackutils.StackTreeNode,
+) (map[string]LineStat, error) {
+	stats := make(map[string]LineStat)
+	var visit func(node *stackutils.StackTreeNode) error
+	visit = func(node *stackutils.StackTreeNode) error {
+		// The root of the tree is the trunk branch, which has no parent within
+		// the stack and isn't itself a PR.
+		if node.Branch.ParentBranchName != "" {
+			base, err := diffBase(ctx, repo, node.Branch.ParentBranchName, node.Branch.BranchName)
+			if err != nil {
+				return err
+			}
+			files, err := repo.DiffNumstat(ctx, base, node.Branch.BranchName)
+			if err != nil {
+				return err
+			}
+			var stat LineStat
+			for _, f := range files {
+				stat.Additions += f.Additions
+				stat.Deletions += f.Deletions
+			}
+			stats[node.Branch.BranchName] = stat
+		}
+		for _, child := range node.Children {
+			if err := visit(child); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := visit(stack); err != nil {
+		return nil, err
+	}
+	return stats, nil
+}
+
+// ComputeCategoryDiffStats breaks down the diff between parentBranch and
+// branchName into the configured categories, based on which file patterns
+// each changed file matches. A file counts towards the first category (in
+// config order) whose glob matches. Files that match none count towards a
+// final fallback category named defaultCategoryName (omitted when empty).
+// Categories with zero line changes are omitted from the result.
+func ComputeCategoryDiffStats(
+	ctx context.Context,
+	repo *git.Repo,
+	parentBranch, branchName string,
+	categories []config.DiffStatCategory,
+	defaultCategoryName string,
+) ([]CategoryLineStat, error) {
+	if len(categories) == 0 {
+		return nil, nil
+	}
+	base, err := diffBase(ctx, repo, parentBranch, branchName)
+	if err != nil {
+		return nil, err
+	}
+	files, err := repo.DiffNumstat(ctx, base, branchName)
+	if err != nil {
+		return nil, err
+	}
+
+	type compiledCategory struct {
+		name  string
+		globs []glob.Glob
+	}
+	compiled := make([]compiledCategory, len(categories))
+	for i, cat := range categories {
+		compiled[i].name = cat.Name
+		for _, pattern := range cat.Globs {
+			g, err := glob.Compile(pattern, '/')
+			if err != nil {
+				logrus.WithError(err).
+					WithField("pattern", pattern).
+					Warn("ignoring invalid diffStatCategories glob pattern")
+				continue
+			}
+			compiled[i].globs = append(compiled[i].globs, g)
+		}
+	}
+
+	categoryFiles := make([][]FileLineStat, len(categories))
+	var fallbackFiles []FileLineStat
+	for _, f := range files {
+		fls := FileLineStat{Path: f.Path, LineStat: LineStat{Additions: f.Additions, Deletions: f.Deletions}}
+		assigned := false
+		for i, cc := range compiled {
+			for _, g := range cc.globs {
+				if g.Match(f.Path) {
+					categoryFiles[i] = append(categoryFiles[i], fls)
+					assigned = true
+					break
+				}
+			}
+			if assigned {
+				break
+			}
+		}
+		if !assigned {
+			fallbackFiles = append(fallbackFiles, fls)
+		}
+	}
+
+	result := make([]CategoryLineStat, 0, len(categories)+1)
+	for i, cc := range compiled {
+		var stat LineStat
+		for _, fl := range categoryFiles[i] {
+			stat.Additions += fl.Additions
+			stat.Deletions += fl.Deletions
+		}
+		if stat.Additions == 0 && stat.Deletions == 0 {
+			continue
+		}
+		sortFilesDesc(categoryFiles[i])
+		result = append(result, CategoryLineStat{Name: cc.name, LineStat: stat, Files: categoryFiles[i]})
+	}
+	if defaultCategoryName != "" {
+		var stat LineStat
+		for _, fl := range fallbackFiles {
+			stat.Additions += fl.Additions
+			stat.Deletions += fl.Deletions
+		}
+		if stat.Additions != 0 || stat.Deletions != 0 {
+			sortFilesDesc(fallbackFiles)
+			result = append(result, CategoryLineStat{Name: defaultCategoryName, LineStat: stat, Files: fallbackFiles})
+		}
+	}
+	return result, nil
+}
+
+func walkStack(
+	tx meta.ReadTx,
+	stack *stackutils.StackTreeNode,
+	branchName string,
+	diffStats map[string]LineStat,
+) string {
 	ssb := strings.Builder{}
 
 	// For simple stacks (i.e., degenerate trees) print them top-down. For example:
@@ -792,6 +979,9 @@ func walkStack(tx meta.ReadTx, stack *stackutils.StackTreeNode, branchName strin
 			ssb.WriteString("**#")
 			ssb.WriteString(strconv.FormatInt(bi.PullRequest.Number, 10))
 			ssb.WriteString("**")
+			if stat, ok := diffStats[node.Branch.BranchName]; ok {
+				ssb.WriteString(fmt.Sprintf(" (+%d -%d)", stat.Additions, stat.Deletions))
+			}
 		}
 		ssb.WriteString("\n")
 	}
@@ -819,6 +1009,9 @@ func walkStack(tx meta.ReadTx, stack *stackutils.StackTreeNode, branchName strin
 				ssb.WriteString("**#")
 				ssb.WriteString(strconv.FormatInt(bi.PullRequest.Number, 10))
 				ssb.WriteString("**")
+				if stat, ok := diffStats[node.Branch.BranchName]; ok {
+					ssb.WriteString(fmt.Sprintf(" (+%d -%d)", stat.Additions, stat.Deletions))
+				}
 			} else {
 				ssb.WriteString("`")
 				ssb.WriteString(node.Branch.BranchName)
@@ -852,12 +1045,156 @@ func walkStack(tx meta.ReadTx, stack *stackutils.StackTreeNode, branchName strin
 	return ssb.String()
 }
 
+// diffStatBarWidth is the number of characters in a proportional bar.
+const diffStatBarWidth = 10
+
+// maxFilenameLength is the maximum rendered length of a file path in the
+// breakdown; longer paths are truncated with a middle ellipsis so the leading
+// directories and trailing filename/extension both stay visible.
+const maxFilenameLength = 40
+
+// childIndent leads each file row under its category.
+const childIndent = "\u00a0\u00a0\u00a0\u00a0"
+
+// sortFilesDesc sorts files in place by total changed lines, descending.
+func sortFilesDesc(files []FileLineStat) {
+	sort.SliceStable(files, func(i, j int) bool {
+		return files[i].Additions+files[i].Deletions > files[j].Additions+files[j].Deletions
+	})
+}
+
+// barAndPercent returns the proportional bar (relative to max) and the absolute
+// percentage (share of sum) for a total.
+func barAndPercent(total, max, sum int) (string, int) {
+	filled := (total*diffStatBarWidth + max/2) / max
+	if filled < 1 {
+		filled = 1
+	}
+	if filled > diffStatBarWidth {
+		filled = diffStatBarWidth
+	}
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", diffStatBarWidth-filled)
+	percentage := (total*100 + sum/2) / sum
+	return bar, percentage
+}
+
+// truncateMiddle shortens s to at most max runes, replacing the cut with a
+// middle ellipsis so the tail (filename and extension) stays visible.
+func truncateMiddle(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	if max < 2 {
+		return string(runes[:max])
+	}
+	head := (max - 1) / 2
+	tail := max - 1 - head
+	return string(runes[:head]) + "…" + string(runes[len(runes)-tail:])
+}
+
+// markdownFileLink returns a Markdown link to the file's diff in the PR's
+// Files-changed view (truncating the displayed path), or the plain full path
+// when no permalink is available. The anchor fragment is the SHA-256 of the
+// repository-relative path, matching GitHub's own #diff-<hash> anchors.
+func markdownFileLink(path, prPermalink string) string {
+	if prPermalink == "" {
+		return path
+	}
+	display := truncateMiddle(path, maxFilenameLength)
+	sum := sha256.Sum256([]byte(path))
+	return fmt.Sprintf("[%s](%s/files#diff-%s)", display, prPermalink, hex.EncodeToString(sum[:]))
+}
+
+// renderDiffStatBarChart renders two tables: an always-visible category rollup
+// (bar relative to the largest category, percentage of the PR total), followed
+// by a collapse-by-default "Detailed Breakdown" that relists each category (no
+// changes/bar column) with its files indented beneath (bar relative to the
+// category's largest file, percentage of the category's total). File paths are
+// truncated with a middle ellipsis.
+func renderDiffStatBarChart(stats []CategoryLineStat, prPermalink string) string {
+	sorted := append([]CategoryLineStat(nil), stats...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].Additions+sorted[i].Deletions > sorted[j].Additions+sorted[j].Deletions
+	})
+	if len(sorted) == 0 {
+		return ""
+	}
+	maxTotal := 0
+	sumTotal := 0
+	for _, s := range sorted {
+		total := s.Additions + s.Deletions
+		sumTotal += total
+		if total > maxTotal {
+			maxTotal = total
+		}
+	}
+	if sumTotal == 0 {
+		return ""
+	}
+
+	sb := strings.Builder{}
+	sb.WriteString("### PR Breakdown\n\n")
+	sb.WriteString("| Breakdown | Changes | |\n")
+	sb.WriteString("|:--|--:|---|\n")
+	for _, s := range sorted {
+		bar, percentage := barAndPercent(s.Additions+s.Deletions, maxTotal, sumTotal)
+		lines := fmt.Sprintf("+%s -%s",
+			humanize.Comma(int64(s.Additions)),
+			humanize.Comma(int64(s.Deletions)),
+		)
+		sb.WriteString(fmt.Sprintf("| **%s** | `%s` | `%s %d%%` |\n", s.Name, lines, bar, percentage))
+	}
+
+	var anyFiles bool
+	for _, s := range sorted {
+		if len(s.Files) > 0 {
+			anyFiles = true
+			break
+		}
+	}
+	if !anyFiles {
+		return sb.String()
+	}
+
+	sb.WriteString("\n<details><summary>Detailed Breakdown</summary>\n\n")
+	sb.WriteString("| Breakdown | Changes | |\n")
+	sb.WriteString("|:--|--:|---|\n")
+	for _, s := range sorted {
+		if len(s.Files) == 0 {
+			continue
+		}
+		label := "files"
+		if len(s.Files) == 1 {
+			label = "file"
+		}
+		sb.WriteString(fmt.Sprintf("| **%s** | %d %s | |\n", s.Name, len(s.Files), label))
+		files := append([]FileLineStat(nil), s.Files...)
+		sortFilesDesc(files)
+		catTotal := s.Additions + s.Deletions
+		maxFileTotal := files[0].Additions + files[0].Deletions
+		for _, f := range files {
+			fbar, fpct := barAndPercent(f.Additions+f.Deletions, maxFileTotal, catTotal)
+			flines := fmt.Sprintf("+%s -%s",
+				humanize.Comma(int64(f.Additions)),
+				humanize.Comma(int64(f.Deletions)),
+			)
+			sb.WriteString(fmt.Sprintf("| %s%s | `%s` | `%s %d%%` |\n",
+				childIndent, markdownFileLink(f.Path, prPermalink), flines, fbar, fpct))
+		}
+	}
+	sb.WriteString("\n</details>\n")
+	return sb.String()
+}
+
 func AddPRMetadataAndStack(
 	body string,
 	prMeta PRMetadata,
 	branchName string,
 	stack *stackutils.StackTreeNode,
 	tx meta.ReadTx,
+	diffStats map[string]LineStat,
+	categoryStats []CategoryLineStat,
 ) string {
 	body, _, err := ParsePRBody(body)
 	if err != nil {
@@ -867,32 +1204,43 @@ func AddPRMetadataAndStack(
 
 	sb := strings.Builder{}
 
-	// Don't write out a stack unless there is more than one PR in it.
 	hasMultilevelStack := stack != nil && len(stack.Children) > 0 &&
 		len(stack.Children[0].Children) > 0
-	if hasMultilevelStack {
-		bi, _ := tx.Branch(branchName)
-		stackString := walkStack(tx, stack, branchName)
+	hasBreakdown := len(categoryStats) > 0
+	if hasMultilevelStack || hasBreakdown {
 		sb.WriteString(PRStackCommentStart)
 
-		// Enclose this stack summary in a table for two reasons:
-		// 1. It actually looks nicer on GitHub
-		// 2. For the Slack GitHub integration, Slack doesn't support and strips out <table> elements in unfurls - we can avoid showing the stack in the unfurl.
-		sb.WriteString("\n<table><tr><td>")
-		sb.WriteString("<details><summary>")
-		if !bi.Parent.Trunk {
-			parentBi, _ := tx.Branch(bi.Parent.Name)
-			sb.WriteString("<b>Depends on #")
-			sb.WriteString(strconv.FormatInt(parentBi.PullRequest.Number, 10))
-			sb.WriteString(".</b> ")
+		// Wrap the entire stack comment in a single 1x1 table so it renders as
+		// one bordered box. Slack strips <table> in unfurls, so none of this
+		// shows there.
+		sb.WriteString("\n<table><tr><td>\n\n")
+		if hasMultilevelStack {
+			bi, _ := tx.Branch(branchName)
+			stackString := walkStack(tx, stack, branchName, diffStats)
+
+			sb.WriteString("<details><summary>")
+			if !bi.Parent.Trunk {
+				parentBi, _ := tx.Branch(bi.Parent.Name)
+				sb.WriteString("<b>Depends on #")
+				sb.WriteString(strconv.FormatInt(parentBi.PullRequest.Number, 10))
+				sb.WriteString(".</b> ")
+			}
+			sb.WriteString(
+				"This PR is part of a stack created with <a href=\"https://github.com/aviator-co/av\">Aviator</a>.",
+			)
+			sb.WriteString("</summary>")
+			sb.WriteString("\n\n")
+			sb.WriteString(stackString)
+			sb.WriteString("</details>\n\n")
 		}
-		sb.WriteString(
-			"This PR is part of a stack created with <a href=\"https://github.com/aviator-co/av\">Aviator</a>.",
-		)
-		sb.WriteString("</summary>")
-		sb.WriteString("\n\n")
-		sb.WriteString(stackString)
-		sb.WriteString("</details>")
+		if hasBreakdown {
+			prPermalink := ""
+			if bi, ok := tx.Branch(branchName); ok && bi.PullRequest != nil {
+				prPermalink = bi.PullRequest.Permalink
+			}
+			sb.WriteString(renderDiffStatBarChart(categoryStats, prPermalink))
+			sb.WriteString("\n")
+		}
 		sb.WriteString("</td></tr></table>\n")
 		sb.WriteString(PRStackCommentEnd)
 		sb.WriteString("\n\n")
@@ -924,6 +1272,7 @@ func AddPRMetadataAndStack(
 // This should be called after all applicable PRs have been created to ensure we can properly link them.
 func UpdatePullRequestWithStack(
 	ctx context.Context,
+	repo *git.Repo,
 	client *gh.Client,
 	tx meta.WriteTx,
 	branchName string,
@@ -947,6 +1296,22 @@ func UpdatePullRequestWithStack(
 		return err
 	}
 
+	var diffStats map[string]LineStat
+	if config.Av.PullRequest.ShowStackDiffStat {
+		if diffStats, err = ComputeStackDiffStats(ctx, repo, stackToWrite); err != nil {
+			return err
+		}
+	}
+	var categoryStats []CategoryLineStat
+	if len(config.Av.PullRequest.DiffStatCategories) > 0 {
+		if categoryStats, err = ComputeCategoryDiffStats(
+			ctx, repo, branchMeta.Parent.Name, branchName, config.Av.PullRequest.DiffStatCategories,
+			config.Av.PullRequest.DiffStatDefaultCategory,
+		); err != nil {
+			return err
+		}
+	}
+
 	existingPR, err := getExistingOpenPR(ctx, client, repoMeta, branchMeta, branchName)
 	if err != nil {
 		return errors.WithStack(err)
@@ -957,7 +1322,7 @@ func UpdatePullRequestWithStack(
 		return err
 	}
 
-	newBody := AddPRMetadataAndStack(body, prMeta, branchName, stackToWrite, tx)
+	newBody := AddPRMetadataAndStack(body, prMeta, branchName, stackToWrite, tx, diffStats, categoryStats)
 	if _, err := client.UpdatePullRequestIfChanged(ctx, existingPR, gh.UpdatePullRequestFields{
 		Body: gh.Ptr(newBody),
 	}); err != nil {
@@ -971,12 +1336,13 @@ func UpdatePullRequestWithStack(
 // the stack of branches that each branch is a part of.
 func UpdatePullRequestsWithStack(
 	ctx context.Context,
+	repo *git.Repo,
 	client *gh.Client,
 	tx meta.WriteTx,
 	branchNames []string,
 ) error {
 	for _, branchName := range branchNames {
-		if err := UpdatePullRequestWithStack(ctx, client, tx, branchName); err != nil {
+		if err := UpdatePullRequestWithStack(ctx, repo, client, tx, branchName); err != nil {
 			return err
 		}
 	}

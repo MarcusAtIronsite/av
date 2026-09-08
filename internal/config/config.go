@@ -42,6 +42,30 @@ type PullRequest struct {
 	// If true, the CLI will automatically add/update a comment to all PRs linking other PRs in the stack.
 	// False by default, since Aviator's MergeQueue also adds a similar comment.
 	WriteStack bool
+
+	// If true, each PR listed in the stack comment (see WriteStack) is annotated with its
+	// own "(+additions -deletions)" line-change counts.
+	ShowStackDiffStat bool
+
+	// Categories used to break down a PR's own line changes (e.g. into "Testing Files",
+	// "Generated Files") into a summary shown in the stack comment. A PR's diff is
+	// compared against each category's Globs in order, and each file is counted towards
+	// the first category whose Globs match. Configure categories most-specific-first so
+	// they do not overlap. Categories with zero line changes are omitted. Empty (the
+	// default) disables the breakdown.
+	DiffStatCategories []DiffStatCategory
+
+	// The name of a fallback category that collects line changes not matched by any
+	// DiffStatCategories glob. Empty (the default) disables the fallback category.
+	DiffStatDefaultCategory string
+}
+
+type DiffStatCategory struct {
+	// The name of the category, e.g. "Testing Files", shown in the PR body.
+	Name string
+	// Glob patterns (matched against repo-relative file paths, e.g. "**/*_test.go")
+	// that belong to this category.
+	Globs []string
 }
 
 type Sync struct {

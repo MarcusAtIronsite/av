@@ -114,6 +114,7 @@ type GitHubPushModel struct {
 	calculatingCandidates bool
 	askingForConfirmation bool
 	runningGitPush        bool
+	refreshingPRs         bool
 	done                  bool
 }
 
@@ -127,7 +128,15 @@ func (vm *GitHubPushModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case *GitHubPushProgress:
 		if msg.candidateCalculationDone {
 			vm.calculatingCandidates = false
-			if len(vm.pushCandidates) == 0 || vm.chooseNoPush {
+			if len(vm.pushCandidates) == 0 {
+				if avconfig.Av.PullRequest.WriteStack {
+					vm.refreshingPRs = true
+					return vm, vm.runRefreshPRs
+				}
+				vm.done = true
+				return vm, vm.onDone()
+			}
+			if vm.chooseNoPush {
 				vm.done = true
 				return vm, vm.onDone()
 			}
@@ -141,6 +150,7 @@ func (vm *GitHubPushModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.gitPushDone {
 			vm.runningGitPush = false
+			vm.refreshingPRs = false
 			vm.done = true
 			return vm, vm.onDone()
 		}
@@ -182,7 +192,9 @@ func (vm *GitHubPushModel) View() tea.View {
 	}
 
 	sb := strings.Builder{}
-	if len(vm.pushCandidates) == 0 {
+	if vm.refreshingPRs {
+		sb.WriteString(colors.ProgressStyle.Render(vm.spinner.View() + "Updating pull requests..."))
+	} else if len(vm.pushCandidates) == 0 {
 		sb.WriteString(colors.SuccessStyle.Render("✓ Nothing to push to GitHub"))
 	} else if vm.askingForConfirmation {
 		sb.WriteString("Confirming the push to GitHub")
@@ -292,6 +304,21 @@ func (vm *GitHubPushModel) runUpdate() (ret tea.Msg) {
 	return &GitHubPushProgress{gitPushDone: true}
 }
 
+// runRefreshPRs updates the PR bodies (stack comment and diff-stat breakdown)
+// for every branch in the sync without pushing. This keeps the breakdown
+// current even when the stack is already fully pushed, in which case
+// calculateChangedBranches finds no push candidates to push.
+func (vm *GitHubPushModel) runRefreshPRs() tea.Msg {
+	ghPRs, err := vm.getAllPRs()
+	if err != nil {
+		return err
+	}
+	if err := vm.updatePRs(ghPRs); err != nil {
+		return err
+	}
+	return &GitHubPushProgress{gitPushDone: true}
+}
+
 func (vm *GitHubPushModel) runGitPush() error {
 	ctx := context.Background()
 	// Split into chunks so we don't exceed GitHub's per-push ref-update
@@ -356,16 +383,35 @@ func (vm *GitHubPushModel) runGitPush() error {
 }
 
 func (vm *GitHubPushModel) getPRs() (map[plumbing.ReferenceName]*gh.PullRequest, error) {
-	prs := map[plumbing.ReferenceName]*gh.PullRequest{}
-	for _, branch := range vm.pushCandidates {
-		avbr, _ := vm.db.ReadTx().Branch(branch.branch.Short())
+	branches := make([]plumbing.ReferenceName, 0, len(vm.pushCandidates))
+	for _, candidate := range vm.pushCandidates {
+		branches = append(branches, candidate.branch)
+	}
+	return vm.getPRsForBranches(branches)
+}
 
-		if avbr.PullRequest == nil {
+// getAllPRs returns the pull requests for every branch in the sync, not just
+// the ones with pending pushes. It is used by runRefreshPRs to keep the stack
+// comment and breakdown current even when nothing needs pushing.
+func (vm *GitHubPushModel) getAllPRs() (map[plumbing.ReferenceName]*gh.PullRequest, error) {
+	return vm.getPRsForBranches(vm.targetBranches)
+}
+
+func (vm *GitHubPushModel) getPRsForBranches(
+	branches []plumbing.ReferenceName,
+) (map[plumbing.ReferenceName]*gh.PullRequest, error) {
+	prs := map[plumbing.ReferenceName]*gh.PullRequest{}
+	for _, br := range branches {
+		avbr, _ := vm.db.ReadTx().Branch(br.Short())
+
+		if avbr.PullRequest == nil ||
+			avbr.PullRequest.State == "MERGED" ||
+			avbr.PullRequest.State == "CLOSED" {
 			continue
 		}
 
 		if pr, ok := vm.pullRequestsCache[avbr.PullRequest.ID]; ok {
-			prs[branch.branch] = pr
+			prs[br] = pr
 			continue
 		}
 
@@ -373,7 +419,7 @@ func (vm *GitHubPushModel) getPRs() (map[plumbing.ReferenceName]*gh.PullRequest,
 		if err != nil {
 			return nil, err
 		}
-		prs[branch.branch] = pr
+		prs[br] = pr
 		vm.pullRequestsCache[avbr.PullRequest.ID] = pr
 	}
 	return prs, nil
@@ -396,10 +442,25 @@ func (vm *GitHubPushModel) updatePRs(ghPRs map[plumbing.ReferenceName]*gh.PullRe
 		prMeta := vm.createPRMetadata(avbr)
 
 		var stackToWrite *stackutils.StackTreeNode
+		var diffStats map[string]actions.LineStat
+		var categoryStats []actions.CategoryLineStat
 		if avconfig.Av.PullRequest.WriteStack {
 			var err error
 			if stackToWrite, err = stackutils.BuildStackTreeCurrentStack(vm.db.ReadTx(), br.Short(), false); err != nil {
 				return err
+			}
+			if avconfig.Av.PullRequest.ShowStackDiffStat {
+				if diffStats, err = actions.ComputeStackDiffStats(context.Background(), vm.repo, stackToWrite); err != nil {
+					return err
+				}
+			}
+			if len(avconfig.Av.PullRequest.DiffStatCategories) > 0 {
+				if categoryStats, err = actions.ComputeCategoryDiffStats(
+					context.Background(), vm.repo, avbr.Parent.Name, avbr.Name, avconfig.Av.PullRequest.DiffStatCategories,
+					avconfig.Av.PullRequest.DiffStatDefaultCategory,
+				); err != nil {
+					return err
+				}
 			}
 		}
 		prBody := actions.AddPRMetadataAndStack(
@@ -408,6 +469,8 @@ func (vm *GitHubPushModel) updatePRs(ghPRs map[plumbing.ReferenceName]*gh.PullRe
 			avbr.Name,
 			stackToWrite,
 			vm.db.ReadTx(),
+			diffStats,
+			categoryStats,
 		)
 		if _, err := vm.client.UpdatePullRequestIfChanged(context.Background(), pr, gh.UpdatePullRequestFields{
 			Body:        gh.Ptr(prBody),
