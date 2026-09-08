@@ -6,9 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -791,11 +791,23 @@ type CategoryLineStat struct {
 	Files []FileLineStat
 }
 
-// resolveDiffBase returns the ref to diff against for a parent branch. It
-// prefers the remote tracking branch (e.g. origin/main) so that a stale local
-// trunk doesn't skew line counts; it falls back to the local branch when no
-// remote tracking branch exists (e.g. an un-pushed parent).
+// resolveDiffBase returns the ref to diff against for a parent branch.
+//
+// A trunk branch diffs against its remote tracking ref (e.g. origin/main),
+// which is fresher than the local trunk that developers rarely keep up to
+// date. A stacked (non-trunk) branch diffs against the local branch instead:
+// av rebases it locally before pushing, so origin/<branch> can trail the
+// local branch and inflate the counts.
 func resolveDiffBase(ctx context.Context, repo *git.Repo, branch string) string {
+	if slices.Contains(repo.TrunkBranches(), branch) {
+		if ok, err := repo.DoesRemoteBranchExist(ctx, branch); err == nil && ok {
+			return repo.GetRemoteName() + "/" + branch
+		}
+		return branch
+	}
+	if ok, err := repo.DoesBranchExist(ctx, branch); err == nil && ok {
+		return branch
+	}
 	if ok, err := repo.DoesRemoteBranchExist(ctx, branch); err == nil && ok {
 		return repo.GetRemoteName() + "/" + branch
 	}

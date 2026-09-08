@@ -502,6 +502,47 @@ func TestComputeCategoryDiffStatsUsesMergeBase(t *testing.T) {
 	}, stats)
 }
 
+func TestComputeCategoryDiffStatsMidStackUsesLocalParent(t *testing.T) {
+	repo := gittest.NewTempRepo(t)
+
+	// Build a two-level stack (main -> parent -> child) where "parent" is a
+	// stacked branch whose local tip has advanced past its remote-tracking ref.
+	// This models a mid-stack PR whose parent was rebased locally but not yet
+	// pushed: origin/parent trails the local parent, so diffing against it
+	// drags the parent's trailing commits into the child's count.
+	repo.CreateRef(t, plumbing.NewBranchReferenceName("parent"))
+	repo.CheckoutBranch(t, plumbing.NewBranchReferenceName("parent"))
+	repo.CommitFile(t, "parent_work.go", "p1\np2\np3\n")
+
+	// Snapshot the "pushed" state as refs/remotes/origin/parent.
+	repo.CreateRef(t, plumbing.NewRemoteReferenceName("origin", "parent"))
+
+	// Advance the local parent; origin/parent now trails it.
+	repo.CommitFile(t, "parent_trailing.go", "x1\nx2\nx3\nx4\n")
+
+	repo.CreateRef(t, plumbing.NewBranchReferenceName("child"))
+	repo.CheckoutBranch(t, plumbing.NewBranchReferenceName("child"))
+	repo.CommitFile(t, "child_only.go", "c1\nc2\nc3\nc4\nc5\n")
+
+	categories := []config.DiffStatCategory{{Name: "All", Globs: []string{"**"}}}
+
+	stats, err := actions.ComputeCategoryDiffStats(
+		t.Context(), repo.AsAvGitRepo(), "parent", "child", categories, "",
+	)
+	require.NoError(t, err)
+	// Only the child's own file counts; the parent's trailing commit must not
+	// leak into the diff.
+	require.Equal(t, []actions.CategoryLineStat{
+		{
+			Name:     "All",
+			LineStat: actions.LineStat{Additions: 5},
+			Files: []actions.FileLineStat{
+				{Path: "child_only.go", LineStat: actions.LineStat{Additions: 5}},
+			},
+		},
+	}, stats)
+}
+
 func TestPRSingleWithCategoryBreakdown(t *testing.T) {
 	tx := fakeReadTx{}
 
