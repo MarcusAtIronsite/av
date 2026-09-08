@@ -1063,7 +1063,7 @@ const diffStatBarWidth = 10
 // maxFilenameLength is the maximum rendered length of a file path in the
 // breakdown; longer paths are truncated with a middle ellipsis so the leading
 // directories and trailing filename/extension both stay visible.
-const maxFilenameLength = 40
+const maxFilenameLength = 36
 
 // childIndent leads each file row under its category.
 const childIndent = "\u00a0\u00a0\u00a0\u00a0"
