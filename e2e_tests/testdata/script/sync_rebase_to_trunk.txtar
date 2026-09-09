@@ -1,0 +1,47 @@
+# Regression: av sync --rebase-to-trunk must rebase stack roots onto the
+# freshly-fetched trunk, not a stale local trunk.
+#
+# Setup:
+#   main = X (initial, pushed to origin)
+#   stack-1 = X -> 1a  (root branch off main)
+#   main advances to X2 and is pushed, so origin/main = X2
+#   stack-1 is rebased onto X2, so its history already contains X2
+#   local main is reset back to X (stale), while origin/main stays at X2
+#
+# Without the fix, av sync --rebase-to-trunk rebases stack-1 onto stale local
+# main (X), replaying X2 as a second commit. With the fix, local main is
+# fast-forwarded to origin/main (X2) before planning, so the rebase is a no-op.
+
+exec git switch main
+
+# Create the stack root.
+exec av branch stack-1
+commit-file stack-file '1a\n' 'Commit 1a'
+
+# Advance main and push; this commit is "already upstream".
+exec git switch main
+commit-file upstream-file 'X2\n' 'Already-upstream commit'
+exec git push origin main
+
+# Rebase the root onto the new main, mirroring a prior sync that already
+# incorporated the upstream commit into the stack's history.
+exec git switch stack-1
+exec git rebase main
+
+# Sanity: the upstream commit is now part of stack-1's history.
+exec git merge-base --is-ancestor origin/main stack-1
+
+# Simulate a stale local trunk: drop local main back before the upstream
+# commit, while origin/main remains at X2.
+exec git update-ref refs/heads/main origin/main~1
+
+exec av sync --rebase-to-trunk --push=no --prune=no
+
+# Local main must have been fast-forwarded to origin/main before planning.
+exec git rev-list --count origin/main ^main
+stdout '^0$'
+
+# The stack must contain exactly one commit (1a) beyond main: the
+# already-upstream commit X2 was not replayed.
+exec git rev-list --count stack-1 ^main
+stdout '^1$'
