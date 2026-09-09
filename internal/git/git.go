@@ -22,6 +22,7 @@ import (
 )
 
 var ErrRemoteNotFound = errors.Sentinel("this repository doesn't have a remote origin")
+var ErrBranchCheckedOutInWorktree = errors.Sentinel("branch is already checked out in another worktree")
 
 const DEFAULT_REMOTE_NAME = "origin"
 
@@ -424,10 +425,13 @@ func (r *Repo) CheckoutBranch(ctx context.Context, opts *CheckoutBranch) (string
 			"stderr": string(res.Stderr),
 		}).Debug("git checkout failed")
 		stderr := string(res.Stderr)
-		if strings.Contains(stderr, "already checked out at") {
-			return "", errors.Errorf(
-				"failed to checkout branch %q: it is already checked out in another worktree\n"+
-					"Use 'git worktree list' to see all worktrees, "+
+		// Git's wording differs across versions: older releases print "already
+		// checked out at <path>", newer ones "already used by worktree".
+		if strings.Contains(stderr, "already checked out at") ||
+			strings.Contains(stderr, "already used by worktree") {
+			return "", errors.Wrapf(
+				ErrBranchCheckedOutInWorktree,
+				"failed to checkout branch %q: use 'git worktree list' to see all worktrees, "+
 					"or switch to that worktree with 'cd <worktree-path>'",
 				opts.Name,
 			)
