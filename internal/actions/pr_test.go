@@ -130,7 +130,7 @@ func TestPRWithStack(t *testing.T) {
 	)
 
 	assert.Equal(t, `<!-- av pr stack begin -->
-<table><tr><td><details><summary><b>Depends on #1001.</b> This PR is part of a stack created with <a href="https://github.com/aviator-co/av">Aviator</a>.</summary>
+<table><tr><td><details><summary>PR Stack based on <code>main</code> (via <a href="https://github.com/MarcusAtIronsite/av">MarcusAtIronsite/av</a>)</summary>
 
 * ➡️ **#1002**
 * **#1001**
@@ -226,12 +226,12 @@ func TestPRWithForkedStack(t *testing.T) {
 	)
 
 	assert.Equal(t, `<!-- av pr stack begin -->
-<table><tr><td><details><summary><b>Depends on #1001.</b> This PR is part of a stack created with <a href="https://github.com/aviator-co/av">Aviator</a>.</summary>
+<table><tr><td><details><summary>PR Stack based on <code>main</code> (via <a href="https://github.com/MarcusAtIronsite/av">MarcusAtIronsite/av</a>)</summary>
 
-* `+"`"+`main`+"`"+`
-  * **#1001**
     * ➡️ **#1002**
+  * **#1001**
   * **#1003**
+* `+"`"+`main`+"`"+`
 </details></td></tr></table>
 <!-- av pr stack end -->
 
@@ -241,6 +241,67 @@ Hello! This is a cool PR that does some neat things.
 This information is embedded by the av CLI when creating PRs to track the status of stacks when using Aviator. Please do not delete or edit this section of the PR.
 `+"```"+`
 {"parent":"foo","parentHead":"bar","parentPull":123,"trunk":"baz"}
+`+"```"+`
+-->
+`, body1)
+}
+
+func TestPRWithStackRoot(t *testing.T) {
+	tx := fakeReadTx{
+		"foo": {
+			Name: "foo",
+			Parent: meta.BranchState{
+				Name:  "main",
+				Trunk: true,
+			},
+			PullRequest: &meta.PullRequest{
+				Number:    1002,
+				Permalink: "https://github.com/org/repo/pull/1002",
+			},
+		},
+	}
+	stack := &stackutils.StackTreeNode{
+		Branch: &stackutils.StackTreeBranchInfo{
+			BranchName: "main",
+		},
+		Children: []*stackutils.StackTreeNode{
+			{
+				Branch: &stackutils.StackTreeBranchInfo{
+					BranchName: "foo",
+				},
+				Children: []*stackutils.StackTreeNode{},
+			},
+		},
+	}
+
+	sampleMeta := actions.PRMetadata{
+		Parent:     "foo",
+		ParentHead: "bar",
+		ParentPull: 123,
+		Trunk:      "main",
+	}
+	body1 := actions.AddPRMetadataAndStack(
+		"Hello! This is a cool PR that does some neat things.",
+		sampleMeta,
+		"foo",
+		stack,
+		tx,
+	)
+
+	assert.Equal(t, `<!-- av pr stack begin -->
+<table><tr><td><details><summary>PR Stack based on <code>main</code> (via <a href="https://github.com/MarcusAtIronsite/av">MarcusAtIronsite/av</a>)</summary>
+
+* ➡️ **#1002**
+* `+"`"+`main`+"`"+`
+</details></td></tr></table>
+<!-- av pr stack end -->
+
+Hello! This is a cool PR that does some neat things.
+
+<!-- av pr metadata
+This information is embedded by the av CLI when creating PRs to track the status of stacks when using Aviator. Please do not delete or edit this section of the PR.
+`+"```"+`
+{"parent":"foo","parentHead":"bar","parentPull":123,"trunk":"main"}
 `+"```"+`
 -->
 `, body1)
