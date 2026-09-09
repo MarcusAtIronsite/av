@@ -19,6 +19,7 @@ import (
 	"github.com/erikgeiser/promptkit/selection"
 	"github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -296,10 +297,7 @@ func (vm *PruneBranchModel) CheckoutInitialState() error {
 		if err == nil {
 			if initialHead.Type() == plumbing.HashReference {
 				// Normal reference that points to a commit. Checking out.
-				if _, err := vm.repo.CheckoutBranch(context.Background(), &git.CheckoutBranch{Name: initialHead.Name().Short()}); err != nil {
-					return err
-				}
-				return nil
+				return vm.checkoutBranchOrSkip(initialHead.Name().Short())
 			}
 		} else if err != plumbing.ErrReferenceNotFound {
 			return err
@@ -311,10 +309,7 @@ func (vm *PruneBranchModel) CheckoutInitialState() error {
 	defaultBranchRef := plumbing.NewBranchReferenceName(defaultBranch)
 	ref, err := vm.repo.GoGitRepo().Reference(defaultBranchRef, true)
 	if err == nil {
-		if _, err := vm.repo.CheckoutBranch(context.Background(), &git.CheckoutBranch{Name: ref.Name().Short()}); err != nil {
-			return err
-		}
-		return nil
+		return vm.checkoutBranchOrSkip(ref.Name().Short())
 	}
 
 	// The default branch doesn't exist. Check the remote tracking branch.
@@ -335,6 +330,24 @@ func (vm *PruneBranchModel) CheckoutInitialState() error {
 	}
 
 	// No remote tracking branch. Skip.
+	return nil
+}
+
+// checkoutBranchOrSkip checks out the given branch, but no-ops when the branch
+// is already checked out in a sibling worktree. The final restore after `av
+// sync` prunes branches is cosmetic: in a multi-worktree repo the trunk is
+// often checked out in the main worktree, and git refuses to check it out
+// again here. Skipping (and leaving this worktree detached) is preferable to a
+// fatal error after the sync already succeeded.
+func (vm *PruneBranchModel) checkoutBranchOrSkip(name string) error {
+	if _, err := vm.repo.CheckoutBranch(context.Background(), &git.CheckoutBranch{Name: name}); err != nil {
+		if errors.Is(err, git.ErrBranchCheckedOutInWorktree) {
+			logrus.WithField("branch", name).
+				Warn("Skipping restore: branch is checked out in another worktree")
+			return nil
+		}
+		return err
+	}
 	return nil
 }
 
