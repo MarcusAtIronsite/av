@@ -877,9 +877,9 @@ func AddPRMetadataAndStack(
 		// 1. It actually looks nicer on GitHub
 		// 2. For the Slack GitHub integration, Slack doesn't support and strips out <table> elements in unfurls - we can avoid showing the stack in the unfurl.
 		sb.WriteString("\n<table><tr><td>")
-		sb.WriteString("<details><summary>PR Tree onto <code>")
+		sb.WriteString("<details><summary>PR Stack based on <code>")
 		sb.WriteString(stack.Branch.BranchName)
-		sb.WriteString("</code> (stacked with <a href=\"https://github.com/MarcusAtIronsite/av\">MarcusAtIronsite/av</a>)</summary>")
+		sb.WriteString("</code> (via <a href=\"https://github.com/MarcusAtIronsite/av\">MarcusAtIronsite/av</a>)</summary>")
 		sb.WriteString("\n\n")
 		sb.WriteString(stackString)
 		sb.WriteString("</details>")

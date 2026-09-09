@@ -130,7 +130,7 @@ func TestPRWithStack(t *testing.T) {
 	)
 
 	assert.Equal(t, `<!-- av pr stack begin -->
-<table><tr><td><details><summary>PR Tree onto <code>main</code> (stacked with <a href="https://github.com/MarcusAtIronsite/av">MarcusAtIronsite/av</a>)</summary>
+<table><tr><td><details><summary>PR Stack based on <code>main</code> (via <a href="https://github.com/MarcusAtIronsite/av">MarcusAtIronsite/av</a>)</summary>
 
 * ➡️ **#1002**
 * **#1001**
@@ -226,7 +226,7 @@ func TestPRWithForkedStack(t *testing.T) {
 	)
 
 	assert.Equal(t, `<!-- av pr stack begin -->
-<table><tr><td><details><summary>PR Tree onto <code>main</code> (stacked with <a href="https://github.com/MarcusAtIronsite/av">MarcusAtIronsite/av</a>)</summary>
+<table><tr><td><details><summary>PR Stack based on <code>main</code> (via <a href="https://github.com/MarcusAtIronsite/av">MarcusAtIronsite/av</a>)</summary>
 
 * `+"`"+`main`+"`"+`
   * **#1001**
@@ -289,7 +289,7 @@ func TestPRWithStackRoot(t *testing.T) {
 	)
 
 	assert.Equal(t, `<!-- av pr stack begin -->
-<table><tr><td><details><summary>PR Tree onto <code>main</code> (stacked with <a href="https://github.com/MarcusAtIronsite/av">MarcusAtIronsite/av</a>)</summary>
+<table><tr><td><details><summary>PR Stack based on <code>main</code> (via <a href="https://github.com/MarcusAtIronsite/av">MarcusAtIronsite/av</a>)</summary>
 
 * ➡️ **#1002**
 * `+"`"+`main`+"`"+`
