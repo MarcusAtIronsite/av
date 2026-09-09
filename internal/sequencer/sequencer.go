@@ -240,6 +240,39 @@ func (seq *Sequencer) rebaseBranch(
 		}
 	}
 
+	// If the branch is already fully merged into the new parent, skip the
+	// rebase. This happens when the branch's PR was merged (regular merge or
+	// squash) but av didn't record the merge commit, e.g. the merge happened
+	// outside av's flow. Rebasing would replay the already-present commits and
+	// either no-op or duplicate changes (e.g. a duplicated JSON key).
+	if !skipGitRebase {
+		merged, err := repo.IsAncestor(ctx, op.Name.String(), newParentHash.String())
+		if err != nil {
+			return nil, err
+		}
+		if merged {
+			skipGitRebase = true
+			logrus.WithField("branch", op.Name.Short()).
+				Debug("Skipping rebase since branch is already merged into new parent")
+		} else {
+			// Squash and cherry-pick merges change the commit SHAs, so the
+			// branch tip is not an ancestor even when its content is fully
+			// present. Fall back to a tree comparison.
+			d, err := repo.Diff(ctx, &git.DiffOpts{
+				Quiet:      true,
+				Specifiers: []string{op.Name.String(), newParentHash.String()},
+			})
+			if err != nil {
+				return nil, err
+			}
+			if d.Empty {
+				skipGitRebase = true
+				logrus.WithField("branch", op.Name.Short()).
+					Debug("Skipping rebase since branch content is already in new parent")
+			}
+		}
+	}
+
 	var result *git.RebaseResult
 	if !skipGitRebase {
 		// The commits from `rebaseFrom` to `snapshot.Name` should be rebased onto `rebaseOnto`.

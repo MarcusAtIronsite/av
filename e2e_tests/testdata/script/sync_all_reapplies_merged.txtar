@@ -1,0 +1,27 @@
+# Test that sync --all --rebase-to-trunk does not re-apply an already-merged
+# commit onto the freshly-fetched trunk.
+#
+# main:    X -> squash(stack-1)   [stack-1's tooling commits squash-merged,
+#                                  no MergeCommit recorded in av metadata]
+# stack-1: \ -> 1a -> 1b          [tooling commits]
+
+exec git switch main
+exec av branch stack-1
+commit-file package.json '{\n  "name": "app"\n}\n' 'add package.json'
+commit-file package.json '{\n  "name": "app",\n  "oxfmt": true\n}\n' 'add-webapp-oxfmt-config'
+
+# Squash-merge stack-1 into main (simulate a merged PR) WITHOUT recording a
+# MergeCommit, so av does not know the branch was already merged.
+exec git switch main
+exec git merge --squash stack-1
+exec git commit --no-edit
+exec git push origin main
+
+exec git switch stack-1
+
+# Sync must not re-apply stack-1's commits: stack-1's tip must be unchanged
+# (a no-op), not rewritten onto the squash commit.
+exec sh -c 'tip=$(git rev-parse stack-1); av sync --all --rebase-to-trunk; test "$(git rev-parse stack-1)" = "$tip"'
+
+# And the tooling change must not be duplicated.
+exec sh -c 'test "$(grep -c oxfmt package.json)" = 1'
