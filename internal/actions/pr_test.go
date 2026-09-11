@@ -145,9 +145,9 @@ func TestPRWithStack(t *testing.T) {
 
 <details><summary><b>Depends on #1001.</b> This PR is part of a stack created with <a href="https://github.com/aviator-co/av">Aviator</a>.</summary>
 
-* ➡️ **#1002**
-* **#1001**
 * `+"`"+`main`+"`"+`
+* **#1001**
+* ➡️ **#1002**
 </details>
 
 </td></tr></table>
@@ -337,9 +337,9 @@ func TestPRWithStackDiffStat(t *testing.T) {
 	expected := "<!-- av pr stack begin -->\n" +
 		"<table><tr><td>\n\n" +
 		"<details><summary><b>Depends on #1001.</b> This PR is part of a stack created with <a href=\"https://github.com/aviator-co/av\">Aviator</a>.</summary>\n\n" +
-		"* ➡️ **#1002** (+12 -3)\n" +
-		"* **#1001** (+170 -7)\n" +
 		"* `main`\n" +
+		"* **#1001** (+170 -7)\n" +
+		"* ➡️ **#1002** (+12 -3)\n" +
 		"</details>\n\n" +
 		"### PR Breakdown\n\n" +
 		"| Breakdown | Changes | |\n" +
