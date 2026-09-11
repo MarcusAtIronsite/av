@@ -172,7 +172,7 @@ Examples:
 				return err
 			}
 
-			return actions.UpdatePullRequestsWithStack(ctx, client, tx, stackBranches)
+			return actions.UpdatePullRequestsWithStack(ctx, repo, client, tx, stackBranches)
 		}
 
 		return nil
@@ -272,7 +272,7 @@ func submitAll(ctx context.Context, current bool, draft bool) error {
 	}
 
 	if config.Av.PullRequest.WriteStack {
-		if err = actions.UpdatePullRequestsWithStack(ctx, client, tx, currentStackBranches); err != nil {
+		if err = actions.UpdatePullRequestsWithStack(ctx, repo, client, tx, currentStackBranches); err != nil {
 			return err
 		}
 	}
