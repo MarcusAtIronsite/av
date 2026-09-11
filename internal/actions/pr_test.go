@@ -132,9 +132,9 @@ func TestPRWithStack(t *testing.T) {
 	assert.Equal(t, `<!-- av pr stack begin -->
 <table><tr><td><details><summary>PR Stack based on <code>main</code> (via <a href="https://github.com/MarcusAtIronsite/av">MarcusAtIronsite/av</a>)</summary>
 
-* ➡️ **#1002**
-* **#1001**
 * `+"`"+`main`+"`"+`
+* **#1001**
+* ➡️ **#1002**
 </details></td></tr></table>
 <!-- av pr stack end -->
 
@@ -291,8 +291,8 @@ func TestPRWithStackRoot(t *testing.T) {
 	assert.Equal(t, `<!-- av pr stack begin -->
 <table><tr><td><details><summary>PR Stack based on <code>main</code> (via <a href="https://github.com/MarcusAtIronsite/av">MarcusAtIronsite/av</a>)</summary>
 
-* ➡️ **#1002**
 * `+"`"+`main`+"`"+`
+* ➡️ **#1002**
 </details></td></tr></table>
 <!-- av pr stack end -->
 

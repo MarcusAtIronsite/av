@@ -766,18 +766,14 @@ func ReadPRMetadata(body string) (PRMetadata, error) {
 func walkStack(tx meta.ReadTx, stack *stackutils.StackTreeNode, branchName string) string {
 	ssb := strings.Builder{}
 
-	// For simple stacks (i.e., degenerate trees) print them top-down. For example:
+	// For simple stacks (i.e., degenerate trees) print them top-down from the
+	// trunk. For example, a main with child #1 and grandchild #2 renders as:
+	// - main
 	// - #1
 	// - #2
-	// - main
 	var visitSimple func(node *stackutils.StackTreeNode, depth int)
 	visitSimple = func(node *stackutils.StackTreeNode, depth int) {
 		bi, _ := tx.Branch(node.Branch.BranchName)
-		if len(node.Children) > 1 {
-			panic("stack tree has more than one child")
-		} else if len(node.Children) == 1 {
-			visitSimple(node.Children[0], depth+1)
-		}
 
 		ssb.WriteString("* ")
 
@@ -794,9 +790,17 @@ func walkStack(tx meta.ReadTx, stack *stackutils.StackTreeNode, branchName strin
 			ssb.WriteString("**")
 		}
 		ssb.WriteString("\n")
+
+		if len(node.Children) > 1 {
+			panic("stack tree has more than one child")
+		} else if len(node.Children) == 1 {
+			visitSimple(node.Children[0], depth+1)
+		}
 	}
 
-	// For more complex stacks, print them sideways using a bulleted list. For example:
+	// For more complex stacks, print them sideways using a nested bulleted
+	// list, trunk first. For example, a main with #1 (child #2) and #3 renders
+	// as:
 	// - main
 	//   - #1
 	//     - #2
